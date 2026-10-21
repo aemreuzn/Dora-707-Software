@@ -12,3 +12,4 @@ Core embedded software for the "Steel Dome" (Çelikkubbe) Air Defense Systems co
 * **Autonomous Firing:** MOSFET-driven AEG airsoft trigger mechanism with adjustable burst and semi-auto pulse configurations.
 * **Tactical Safety:** Programmable no-fire zones (friendly fire prevention), watchdog timers, and strict ARM/DISARM states.
 * **Serial API:** Fully integrated with the custom Web HUD for manual joystick override, system configuration, and live telemetry.
+* 
