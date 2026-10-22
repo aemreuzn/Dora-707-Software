@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <cmath>
+const int ATIS_PIN = 25;                     // AEG motor MOSFET gate pini (N-kanal, alt taraf anahtarlama)
 const int ATIS_AKTIF_SEVIYE = HIGH;
 const int ATIS_PASIF_SEVIYE = (ATIS_AKTIF_SEVIYE == HIGH) ? LOW : HIGH;
 
