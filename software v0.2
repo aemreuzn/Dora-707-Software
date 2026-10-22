@@ -1,8 +1,14 @@
 #include <Arduino.h>
 #include <cmath>
-const int ATIS_PIN = 25;                     // AEG motor MOSFET gate pini (N-kanal, alt taraf anahtarlama)
+
+// ---------- Atış Pini (Kendi donanımınıza göre pini ayarlayabilirsiniz) ----------
+const int ATIS_PIN = 32; 
+
 const int ATIS_AKTIF_SEVIYE = HIGH;
 const int ATIS_PASIF_SEVIYE = (ATIS_AKTIF_SEVIYE == HIGH) ? LOW : HIGH;
+
+// ---------- Yeni Veri Kontrol Bayrağı ----------
+bool yeniKameraVerisi = false; 
 
 // ---------- Geometri ve Kamera Sabitleri ----------
 const float MERKEZ_X = 640.0, SABIT_MERKEZ_Y = 360.0;
@@ -31,6 +37,7 @@ const unsigned long ATIS_BEKLEME_MS      = 500; // İki atış arası zorunlu be
 const unsigned long ATIS_SURE_MIN_MS     = 20;  // AEG motor çalışma süresi alt sınırı
 const unsigned long ATIS_SURE_MAX_MS     = 300; // AEG motor çalışma süresi üst sınırı (tek atış için bile çok uzun olmasın)
 const unsigned long WATCHDOG_MS          = 500; // Hedef/YOK paketi bu süreden uzun gelmezse güvenli duruş
+
 // ---------- Manuel Mod ----------
 const unsigned long MANUEL_ZAMAN_ASIMI_MS = 300;  // JOY paketi bu süreden uzun gelmezse dur + DISARM
 const float MANUEL_MAX_GUC = 25.0f;               // JOY=±100 -> maksimum hızın %25'i (test ederek ayarla)
@@ -106,7 +113,7 @@ bool hedefKilitlendi = false;                // Tolerans ve süre şartı sağla
 unsigned long kilitBaslangicMs = 0;          // Kesintisiz kilitlenme sayacı
 unsigned long sonAtisMs = 0;                 // Son ateş zamanı (cooldown)
 unsigned long atisBaslangicMs = 0;           // AEG motoru çalıştırma başlangıcı
-unsigned long atisSureMs = 80;               // AEG motoru çalışma süresi (ms). Silahında 1 BB/atış olacak şekilde KALİBRE et: ATESSURE,ms
+unsigned long atisSureMs = 80;               // AEG motoru çalışma süresi (ms). Silahında 1 BB/atış olacak şekilde KALİBRE et
 bool atisYapiliyor = false;                  // Şu an tetik çekili mi?
 unsigned long atisSayaci = 0;                // Açılıştan beri atış sayısı (DURUM'da raporlanır)
 enum Mod { MOD_OTONOM = 0, MOD_MANUEL = 1 };
@@ -208,8 +215,6 @@ bool manuelAtisTetikle() {
         Serial.println("HATA: Sistem kurulmamis (DISARMED)! Once ARM komutu verin.");
         return false;
     }
-    // [2] MANUEL modda operatör bağlantısını loop'taki JOY watchdog'u zaten garanti eder;
-    //     hedef paketi şartı yalnızca OTONOM modda aranır.
     if (mod == MOD_OTONOM && !hedefVerisiTaze()) {
         Serial.println("HATA: Hedef verisi yok, atis engellendi.");
         return false;
@@ -237,7 +242,7 @@ bool manuelAtisTetikle() {
 void otomatikAtisKontrol() {
     if (!otomatikAtisAktif) return;
     if (!sistemKurulu) return;
-    if (!hedefVar) return;                   // [1] YOK durumunda asla ateş yok
+    if (!hedefVar) return;                   
     if (!hedefKilitlendi) return;
     if (!hedefVerisiTaze()) return;
     if (eksenX.at.aktif || eksenY.at.aktif) return;
@@ -250,8 +255,7 @@ void otomatikAtisKontrol() {
     Serial.println("OTOMATIK ATIS GERCEKLESTI!");
 }
 
-// Dinamik Merkez (Paralaks) Hesabı - Yalnızca yeni Z geldiğinde çağrılır
-// NOT: İşaret (+) kameranın namlunun ÜSTÜNDE olduğunu varsayar; yakın mesafe test atışıyla doğrulayın.
+// Dinamik Merkez (Paralaks) Hesabı
 void dinamikMerkezGuncelle() {
     float ekstraAciDerece = atan2(KAMERA_NAMLU_FARKI_CM, (float)hedefZ_CM) * RAD_TO_DEG;
     dinamikMerkezY = SABIT_MERKEZ_Y + (ekstraAciDerece / DERECE_BASINA_PIKSEL_Y);
@@ -312,7 +316,6 @@ void roleAdimi(Eksen &e, float hata) {
     if (a.olcum >= ROLE_OLCUM) {
         float genlik = a.genlikTop / a.olcum;
         float Tu     = a.periyotTop / a.olcum;
-        // [3] Histerezisli röle için tanımlayıcı fonksiyon: Ku = 4d / (pi * sqrt(a^2 - eps^2))
         float etkinGenlik = sqrtf(fmaxf(genlik * genlik - ROLE_HISTEREZ * ROLE_HISTEREZ, 1.0f));
         float Ku     = (4.0f * ROLE_GUC) / (PI * etkinGenlik);
         float dt     = PID_PERIYOT_US / 1e6;
@@ -335,11 +338,9 @@ void roleAdimi(Eksen &e, float hata) {
 // ============================================================================
 // PID VE İVMELENME KONTROLÜ
 // ============================================================================
-// Güç hedefinden ivme rampası ve adım aralığı üretir (PID ve MANUEL mod ortak kullanır)
+// Güç hedefinden ivme rampası ve adım aralığı üretir
 void rampaVeAralik(Eksen &e, float dt) {
-    // --- İvmelenme Rampası Kontrolü ---
     if (e.at.aktif) {
-        // Oto-ayar sırasında röle kare dalgasının bozulmaması için rampa atlanır!
         e.anlikGuc = e.hedefGuc;
     } else {
         float maxGucDegisim = (IVME_SPS2 / HIZ_MAX_SPS * 100.0f) * dt;
@@ -350,7 +351,6 @@ void rampaVeAralik(Eksen &e, float dt) {
         }
     }
 
-    // --- Adım Aralığını Hesapla (motorSur içinde CPU yormaz) ---
     float mutlakGuc = fabs(e.anlikGuc);
     if (mutlakGuc < 1.0) {
         e.adimAralikUs = 0;
@@ -360,37 +360,38 @@ void rampaVeAralik(Eksen &e, float dt) {
     }
 }
 
-void pidVeHizHesapla(Eksen &e, int hedef, float merkez, float dt) {
-    e.filtreli = ALFA * hedef + (1.0 - ALFA) * e.filtreli;
-    float hata = e.filtreli - merkez;
+void pidVeHizHesapla(Eksen &e, int hedef, float merkez, float dt, bool yeniVeri) {
+    if (yeniVeri) {
+        e.filtreli = ALFA * hedef + (1.0 - ALFA) * e.filtreli;
+        float hata = e.filtreli - merkez;
 
-    if (e.at.aktif) {
-        roleAdimi(e, hata);
-    } else {
-        // Ölü bölge kontrolü
-        if (fabs(hata) <= OLU_BOLGE_PX) {
-            e.hedefGuc = 0;
-            e.toplamHata = 0;
-            e.oncekiHata = hata;
+        if (e.at.aktif) {
+            roleAdimi(e, hata);
         } else {
-            // Anti-windup
-            if (fabs(hata) < 30.0) {
-                e.toplamHata += hata;
-                if (e.Ki > 0.0) {
-                    float lim = I_MAX_GUC / e.Ki;
-                    e.toplamHata = constrain(e.toplamHata, -lim, lim);
-                }
-            } else {
+            if (fabs(hata) <= OLU_BOLGE_PX) {
+                e.hedefGuc = 0;
                 e.toplamHata = 0;
-            }
+                e.oncekiHata = hata;
+            } else {
+                if (fabs(hata) < 30.0) {
+                    e.toplamHata += hata;
+                    if (e.Ki > 0.0) {
+                        float lim = I_MAX_GUC / e.Ki;
+                        e.toplamHata = constrain(e.toplamHata, -lim, lim);
+                    }
+                } else {
+                    e.toplamHata = 0;
+                }
 
-            float dHata = hata - e.oncekiHata;
-            float guc = e.Kp * hata + e.Ki * e.toplamHata + e.Kd * dHata;
-            e.oncekiHata = hata;
-            e.hedefGuc = constrain(guc, -100.0, 100.0);
+                float dHata = hata - e.oncekiHata;
+                float guc = e.Kp * hata + e.Ki * e.toplamHata + e.Kd * dHata;
+                e.oncekiHata = hata;
+                e.hedefGuc = constrain(guc, -100.0, 100.0);
+            }
         }
     }
-
+    
+    // Rampa her halükarda dt süresiyle güncellenir (2 ms'de bir)
     rampaVeAralik(e, dt);
 }
 
@@ -404,19 +405,18 @@ void motorSur(Eksen &e) {
     if (!hareketIzinli(e, yon)) {
         e.toplamHata = 0;
         e.anlikGuc = 0;
-        e.adimAralikUs = 0;   // bir sonraki PID adımına kadar dur (ters adım atmasın)
+        e.adimAralikUs = 0;  
         return;
     }
 
     unsigned long simdi = micros();
     if (simdi - e.sonAdimUs < e.adimAralikUs) return;
 
-    // Yön değişimi kontrolü (TB6600 optokuplör koruma gecikmesi)
     int dirPinDurum = (yon > 0) ? HIGH : LOW;
     if (e.sonDirDurum != dirPinDurum) {
         digitalWrite(e.dirPin, dirPinDurum);
         e.sonDirDurum = dirPinDurum;
-        delayMicroseconds(10); // Yalnızca yön DEĞİŞTİĞİNDE 10 µs setup süresi
+        delayMicroseconds(10); 
     }
 
     digitalWrite(e.pulPin, HIGH);
@@ -424,7 +424,7 @@ void motorSur(Eksen &e) {
     digitalWrite(e.pulPin, LOW);
 
     e.adim += yon;
-    e.sonAdimUs = simdi;
+    e.sonAdimUs += e.adimAralikUs; // JITTER DÜZELTMESİ: Sabit zaman aralığı kadar ileri sar
 }
 
 // ============================================================================
@@ -437,8 +437,6 @@ void eksenGecmisiSifirla(Eksen &e) {
     e.at.aktif = false;        // anlikGuc dokunulmaz: rampa ile yumuşak durur
 }
 
-// [1] OTONOM modda hedef görünmüyorken: motorlar rampa ile durur, kilit ve atış yok.
-//     Bağlantı canlı olduğu için ARM korunur.
 void hedefYokDurumu(float dt) {
     if (eksenX.at.aktif || eksenY.at.aktif) {
         Serial.println("Oto-ayar iptal: hedef kayboldu");
@@ -452,7 +450,6 @@ void hedefYokDurumu(float dt) {
     yenidenKilitGerekli = false;
 }
 
-// [5] Hedef yeniden bulunduğunda filtreyi yeni konuma oturt, türev sıçramasını önle
 void hedefYenidenBulundu() {
     eksenX.filtreli = hedefX;
     eksenY.filtreli = hedefY;
@@ -462,7 +459,6 @@ void hedefYenidenBulundu() {
     eksenY.toplamHata = 0;
 }
 
-// Kullanıcı denetiminde mod değişimi (şartname: modlar arası geçiş kullanıcıdadır)
 void modDegistir(Mod yeni) {
     if (yeni == mod) return;
     mod = yeni;
@@ -474,10 +470,10 @@ void modDegistir(Mod yeni) {
     hedefKilitlendi = false;
     kilitBaslangicMs = 0;
     yenidenKilitGerekli = false;
-    otomatikAtisAktif = false;   // oto-ateş her mod geçişinde yeniden, açıkça açılmalı
+    otomatikAtisAktif = false;   
 
     if (mod == MOD_OTONOM) {
-        eksenX.filtreli = hedefX;  // modlar arası sıçramayı önle
+        eksenX.filtreli = hedefX;  
         eksenY.filtreli = hedefY;
         Serial.println("BILGI: OTONOM mod.");
     } else {
@@ -485,7 +481,6 @@ void modDegistir(Mod yeni) {
     }
 }
 
-// Veri / operatör bağlantısı kesildiğinde: motorları durdur, ateşi kes, emniyete al
 void guvenliDurus(const char *neden) {
     if (eksenX.at.aktif || eksenY.at.aktif) {
         Serial.println("Oto-ayar iptal: baglanti kesildi");
@@ -493,31 +488,26 @@ void guvenliDurus(const char *neden) {
     eksenX.at.aktif = false;
     eksenY.at.aktif = false;
 
-    // Motorlar anında sıfırlanır
     eksenX.hedefGuc = 0;        eksenY.hedefGuc = 0;
     eksenX.anlikGuc = 0;        eksenY.anlikGuc = 0;
     eksenX.adimAralikUs = 0;    eksenY.adimAralikUs = 0;
     joyX = 0;                   joyY = 0;
 
-    // İntegral ve türev geçmişini sıfırla
     eksenX.toplamHata = 0;      eksenY.toplamHata = 0;
     eksenX.oncekiHata = 0;      eksenY.oncekiHata = 0;
 
-    // Ateşlemeyi kesin olarak kapat ve kilitlenmeyi düşür
     atisDurdur();
     hedefKilitlendi = false;
     kilitBaslangicMs = 0;
     yenidenKilitGerekli = false;
-    hedefVar = false;           // veri dönünce filtre yeniden oturtulur
+    hedefVar = false;           
 
-    // Bağlantı kopması sistemi EMNİYETE alır; bağlantı dönünce tekrar ARM gerekir
     if (sistemKurulu || otomatikAtisAktif) {
         Serial.printf("UYARI: %s, sistem DISARM edildi.\n", neden);
     }
     sistemKurulu = false;
     otomatikAtisAktif = false;
 
-    // İletişim tekrar başladığında ilk dt'nin fırlamasını önle
     sonPidUs = micros();
 }
 
@@ -527,15 +517,14 @@ void guvenliDurus(const char *neden) {
 void yardimYazdir() {
     Serial.println("KOMUTLAR: <x,y,z> | YOK | JOY,vx,vy | MOD,0/1 | ARM | DISARM | OTO_ATES,0/1 | ATES");
     Serial.println("          ATESSURE,ms | ATX | ATY | PIDX,kp,ki,kd | PIDY,kp,ki,kd");
-    Serial.println("          YH,pmin,pmax,tmin,tmax | YA,i,pmin,pmax,tmin,tmax | YC | SIFIR | DURUM");
+    Serial.println("          YH,pmin,pmax,tmin,tmax | YA,i,pmin,pmax,tmin,tmax | YC | SIFIR | DURUM | YARDIM");
 }
 
 void komutIsle(char *paket) {
     int x, y, z, i;
     float a, b, c, d;
 
-    // 0. En sık gelen paketler önce (hız için)
-    // 5. Hedef Paketi: <x,y,z> - Watchdog SADECE GEÇERLİ HEDEF/YOK PAKETİNDE SIFIRLANIR!
+    // Hedef Paketi: <x,y,z>
     if (sscanf(paket, "<%d,%d,%d>", &x, &y, &z) == 3) {
         if (x < 0 || x > (int)GORUNTU_GENISLIK || y < 0 || y > (int)GORUNTU_YUKSEKLIK) {
             Serial.println("HATA: Hedef paketi goruntu disinda, yok sayildi.");
@@ -547,32 +536,27 @@ void komutIsle(char *paket) {
         hedefZ_CM = (z <= 10) ? 10 : z;
         dinamikMerkezGuncelle();
         hedefVar = true;
+        yeniKameraVerisi = true; // Yeni paket geldiğini bildir
         if (yeniBulundu && mod == MOD_OTONOM) hedefYenidenBulundu();
     }
-    // [1] Hedef görünmüyor: bağlantı canlı, ama takip/kilit/atış yok
     else if (strcmp(paket, "YOK") == 0) {
         sonVeriZamani = millis();
         hedefVar = false;
     }
     else if (sscanf(paket, "JOY,%f,%f", &a, &b) == 2) {
-        // [9] Operatör heartbeat'i her modda tazelenir; hareket komutu yalnızca MANUEL modda uygulanır
         sonJoyMs = millis();
         if (mod == MOD_MANUEL) {
             joyX = constrain(a, -100.0f, 100.0f);
             joyY = constrain(b, -100.0f, 100.0f);
         }
     }
-    // 1. Silah Emniyet Komutları (ARM / DISARM)
     else if (strcmp(paket, "ARM") == 0) {
-        // [6] Bağlantı yoksa ARM anlamsız (watchdog hemen DISARM eder); açıkça reddet
         if (!baglantiHazir()) {
             Serial.println(mod == MOD_MANUEL
                 ? "HATA: ARM reddedildi, JOY baglantisi yok."
                 : "HATA: ARM reddedildi, hedef/YOK verisi yok.");
         } else {
             sistemKurulu = true;
-            // [4] ARM anındaki hazır kilitle ateş etme: kilit sayacı sıfırlanır,
-            //     hedef toleransta yeniden KILITLENME_SURESI_MS kadar kalmalı
             hedefKilitlendi = false;
             kilitBaslangicMs = 0;
             Serial.println("UYARI: SILAH KURULDU (ARMED)!");
@@ -583,11 +567,10 @@ void komutIsle(char *paket) {
         atisDurdur();
         Serial.println("BILGI: SILAH EMNIYETTE (DISARMED).");
     }
-    // 2. Otomatik Atış Modu Aç/Kapat
     else if (strcmp(paket, "OTO_ATES,1") == 0) {
         if (mod == MOD_OTONOM) {
             otomatikAtisAktif = true;
-            hedefKilitlendi = false;      // açıldığı anda mevcut kilitle ateş etme: taze kilit beklenir
+            hedefKilitlendi = false;      
             kilitBaslangicMs = 0;
             Serial.println("BILGI: Otomatik atis AKTIF.");
         } else {
@@ -598,11 +581,9 @@ void komutIsle(char *paket) {
         otomatikAtisAktif = false;
         Serial.println("BILGI: Otomatik atis PASIF (Manuel tetik modu).");
     }
-    // 3. Manuel Atış Komutu (Aşama 1)
     else if (strcmp(paket, "ATES") == 0) {
         manuelAtisTetikle();
     }
-    // AEG motor çalışma süresini canlı ayarla (kalibrasyon): ATESSURE,ms
     else if (sscanf(paket, "ATESSURE,%d", &i) == 1) {
         if (atisYapiliyor) {
             Serial.println("HATA: Atis sirasinda sure degistirilemez.");
@@ -613,16 +594,14 @@ void komutIsle(char *paket) {
             Serial.printf("BILGI: Atis motor suresi = %lu ms\n", atisSureMs);
         }
     }
-    // 4. Kalibrasyon ve Bilgi Komutları
-    else if (strcmp(paket, "MOD,1") == 0)        modDegistir(MOD_MANUEL);
-    else if (strcmp(paket, "MOD,0") == 0)        modDegistir(MOD_OTONOM);
-    else if (strncmp(paket, "ATX", 3) == 0 || strncmp(paket, "ATY", 3) == 0) {
+    else if (strcmp(paket, "MOD,1") == 0) modDegistir(MOD_MANUEL);
+    else if (strcmp(paket, "MOD,0") == 0) modDegistir(MOD_OTONOM);
+    else if (strcmp(paket, "ATX") == 0 || strcmp(paket, "ATY") == 0) {
         Eksen &e = (paket[2] == 'X') ? eksenX : eksenY;
         if (mod != MOD_OTONOM)            Serial.println("HATA: Oto-ayar yalnizca OTONOM modda.");
         else if (!hedefVar)               Serial.println("HATA: Oto-ayar icin gorunur hedef gerekli.");
         else otoAyarBaslat(e, (paket[2] == 'X') ? "Pan (X)" : "Tilt (Y)");
     }
-    // [8] Elle kazanç girişi: PIDX,kp,ki,kd / PIDY,kp,ki,kd
     else if ((strncmp(paket, "PIDX,", 5) == 0 || strncmp(paket, "PIDY,", 5) == 0)
              && sscanf(paket + 5, "%f,%f,%f", &a, &b, &c) == 3) {
         Eksen &e = (paket[3] == 'X') ? eksenX : eksenY;
@@ -636,8 +615,7 @@ void komutIsle(char *paket) {
             Serial.printf("BILGI: %c ekseni -> Kp: %.4f, Ki: %.6f, Kd: %.4f\n", paket[3], e.Kp, e.Ki, e.Kd);
         }
     }
-    else if (strncmp(paket, "SIFIR", 5) == 0) {
-        // [6] Konum sıfırı yasak bölge hesabını değiştirir: yalnızca emniyetteyken
+    else if (strcmp(paket, "SIFIR") == 0) {
         if (sistemKurulu) {
             Serial.println("HATA: SIFIR yalnizca DISARM iken yapilabilir.");
         } else {
@@ -645,7 +623,7 @@ void komutIsle(char *paket) {
             Serial.println("BILGI: Konum sifirlandi (0/0).");
         }
     }
-    else if (strncmp(paket, "DURUM", 5) == 0) {
+    else if (strcmp(paket, "DURUM") == 0) {
         Serial.printf("Pan: %.1f, Tilt: %.1f | MOD: %s | ARM: %s | OtoAtis: %s | Hedef: %s | Kilit: %s | AtisIzin: %s\n",
                       aciDerece(eksenX), aciDerece(eksenY),
                       (mod == MOD_MANUEL) ? "MANUEL" : "OTONOM",
@@ -659,11 +637,10 @@ void komutIsle(char *paket) {
         Serial.printf("X Kp/Ki/Kd: %.4f/%.6f/%.4f | Y Kp/Ki/Kd: %.4f/%.6f/%.4f\n",
                       eksenX.Kp, eksenX.Ki, eksenX.Kd, eksenY.Kp, eksenY.Ki, eksenY.Kd);
     }
-    else if (strncmp(paket, "YARDIM", 6) == 0) {
+    else if (strcmp(paket, "YARDIM") == 0) {
         yardimYazdir();
     }
-    else if (strncmp(paket, "YC", 2) == 0) {
-        // [6] Yasak bölge kaldırmak emniyeti azaltır: yalnızca DISARM iken
+    else if (strcmp(paket, "YC") == 0) {
         if (sistemKurulu) {
             Serial.println("HATA: Yasak bolgeler yalnizca DISARM iken temizlenebilir.");
         } else {
@@ -690,13 +667,11 @@ void komutIsle(char *paket) {
 // ESP32 KURULUM (SETUP)
 // ============================================================================
 void setup() {
-    // Ateşleme pini EN BAŞTA güvenli seviyeye çekilir
     pinMode(ATIS_PIN, OUTPUT);
     digitalWrite(ATIS_PIN, ATIS_PASIF_SEVIYE);
 
     Serial.begin(115200);
 
-    // Motor pinleri
     pinMode(eksenX.dirPin, OUTPUT); pinMode(eksenX.pulPin, OUTPUT);
     pinMode(eksenY.dirPin, OUTPUT); pinMode(eksenY.pulPin, OUTPUT);
     digitalWrite(eksenX.pulPin, LOW); digitalWrite(eksenY.pulPin, LOW);
@@ -718,7 +693,6 @@ void loop() {
         char ch = Serial.read();
         if (ch == '\n' || ch == '\r') {
             if (satirTasti) {
-                // [7] Kesik komut asla işlenmez
                 Serial.println("HATA: Komut cok uzun, yok sayildi.");
                 satirTasti = false;
                 bufferIndeks = 0;
@@ -735,9 +709,6 @@ void loop() {
     }
 
     // 2. Watchdog Güvenliği
-    //    OTONOM: hedef/YOK paketi 500 ms gelmezse güvenli duruş
-    //            (+ opsiyonel: JOY heartbeat 300 ms gelmezse)
-    //    MANUEL: JOY paketi (operatör heartbeat) 300 ms gelmezse güvenli duruş
     if (mod == MOD_OTONOM && !hedefVerisiTaze()) {
         guvenliDurus("hedef verisi kesildi");
         return;
@@ -751,18 +722,16 @@ void loop() {
         return;
     }
 
-    // 3. Ateş Darbesi Zamanlaması (motor süresi dolduysa MOSFET'i kapat)
+    // 3. Ateş Darbesi Zamanlaması
     atisGuncelle();
 
     // 4. Kontrol Döngüsü (Sabit Periyot)
     unsigned long simdiUs = micros();
     if (simdiUs - sonPidUs >= PID_PERIYOT_US) {
-        // dt sınırlaması: ilk adımda rampanın devreden çıkmasını önler
         float dt = min((float)(simdiUs - sonPidUs) / 1e6f, 0.01f);
         sonPidUs = simdiUs;
 
         if (mod == MOD_MANUEL) {
-            // Operatör hız komutu; yasak alan ve rampa motorSur/rampaVeAralik'te uygulanır
             eksenX.hedefGuc = joyX * (MANUEL_MAX_GUC / 100.0f) * JOY_ISARET_X;
             eksenY.hedefGuc = joyY * (MANUEL_MAX_GUC / 100.0f) * JOY_ISARET_Y;
             rampaVeAralik(eksenX, dt);
@@ -770,13 +739,16 @@ void loop() {
             hedefKilitlendi = false;
             kilitBaslangicMs = 0;
         } else if (!hedefVar) {
-            // [1] OTONOM ama hedef görünmüyor: yumuşak duruş, kilit/atış yok, ARM korunur
             hedefYokDurumu(dt);
         } else {
-            pidVeHizHesapla(eksenX, hedefX, MERKEZ_X, dt);
-            pidVeHizHesapla(eksenY, hedefY, dinamikMerkezY, dt);
+            // PID'ye yeniKameraVerisi durumunu gönder
+            pidVeHizHesapla(eksenX, hedefX, MERKEZ_X, dt, yeniKameraVerisi);
+            pidVeHizHesapla(eksenY, hedefY, dinamikMerkezY, dt, yeniKameraVerisi);
+            
+            // Veri işlendikten sonra bayrağı temizle
+            yeniKameraVerisi = false; 
 
-            // Kilitlenme Kontrolü (Dinamik tolerans ve süre filtreli)
+            // Kilitlenme Kontrolü
             float tolerans = toleransPx;
             float hataX = fabs(eksenX.filtreli - MERKEZ_X);
             float hataY = fabs(eksenY.filtreli - dinamikMerkezY);
@@ -790,10 +762,9 @@ void loop() {
             } else {
                 kilitBaslangicMs = 0;
                 hedefKilitlendi = false;
-                yenidenKilitGerekli = false;   // kilit düştü: bir sonraki kilit yeni atışa izin verir
+                yenidenKilitGerekli = false;   
             }
 
-            // Aşama 2 / 3 için otomatik ateşleme kontrolü
             otomatikAtisKontrol();
         }
     }
